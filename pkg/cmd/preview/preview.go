@@ -92,6 +92,7 @@ type PreviewOptions struct {
 	PostPreviewJobTimeout  string
 	PostPreviewJobPollTime string
 	PreviewHealthTimeout   string
+	Helmfile               string
 
 	PullRequestName string
 	GitConfDir      string
@@ -160,6 +161,7 @@ func (o *PreviewOptions) AddPreviewOptions(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&o.PostPreviewJobTimeout, optionPostPreviewJobTimeout, "", "2h", "The duration before we consider the post preview Jobs failed")
 	cmd.Flags().StringVarP(&o.PostPreviewJobPollTime, optionPostPreviewJobPollTime, "", "10s", "The amount of time between polls for the post preview Job status")
 	cmd.Flags().StringVarP(&o.PreviewHealthTimeout, optionPreviewHealthTimeout, "", "5m", "The amount of time to wait for the preview application to become healthy")
+	cmd.Flags().StringVarP(&o.Helmfile, "helmfile", "", "", "If not empty, will use https://github.com/roboll/helmfile to deploy the preview env, using this specific helmfile (e.g. 'helmfile.yaml')")
 	cmd.Flags().BoolVarP(&o.NoComment, "no-comment", "", false, "Disables commenting on the Pull Request after preview is created.")
 	cmd.Flags().BoolVarP(&o.SkipAvailabilityCheck, "skip-availability-check", "", false, "Disables the mandatory availability check.")
 }
@@ -507,26 +509,54 @@ func (o *PreviewOptions) Run() error {
 
 	setValues, setStrings := o.GetEnvChartValues(o.Namespace, env)
 
-	helmOptions := helm.InstallChartOptions{
-		Chart:       ".",
-		ReleaseName: o.ReleaseName,
-		Ns:          o.Namespace,
-		SetValues:   setValues,
-		SetStrings:  setStrings,
-		ValueFiles:  []string{configFileName},
-		Wait:        true,
-	}
+	if len(o.Helmfile) > 0 {
+		log.Logger().Info("Installing Preview Environment with Helmfile...")
+		stateValues := []string{}
+		stateValues = append(stateValues, setValues...)
+		stateValues = append(stateValues, setStrings...)
+		helmfileCmd := &util.Command{
+			Name: "helmfile",
+			Args: []string{
+				fmt.Sprintf("--file=%s", o.Helmfile),
+				fmt.Sprintf("--state-values-file=%s", configFileName),
+				fmt.Sprintf("--state-values-set=%s", strings.Join(stateValues, ",")),
+				fmt.Sprintf("--namespace=%s", o.Namespace),
+				"apply",
+			},
+			Dir: dir,
+		}
+		if o.Verbose {
+			helmfileCmd.Out = os.Stdout
+			helmfileCmd.Err = os.Stderr
+			log.Logger().Infof("Running: %s", helmfileCmd.String())
+		}
+		_, err = helmfileCmd.RunWithoutRetry()
+		if err != nil {
+			return err
+		}
+		log.Logger().Info("Preview Environment successfully installed with Helmfile!")
+	} else {
+		helmOptions := helm.InstallChartOptions{
+			Chart:       ".",
+			ReleaseName: o.ReleaseName,
+			Ns:          o.Namespace,
+			SetValues:   setValues,
+			SetStrings:  setStrings,
+			ValueFiles:  []string{configFileName},
+			Wait:        true,
+		}
 
-	// if the preview chart has values.yaml then pass that so we can replace any secrets from vault
-	defaultValuesFileName := filepath.Join(dir, opts.ValuesFile)
-	_, err = ioutil.ReadFile(defaultValuesFileName)
-	if err == nil {
-		helmOptions.ValueFiles = append(helmOptions.ValueFiles, defaultValuesFileName)
-	}
+		// if the preview chart has values.yaml then pass that so we can replace any secrets from vault
+		defaultValuesFileName := filepath.Join(dir, opts.ValuesFile)
+		_, err = ioutil.ReadFile(defaultValuesFileName)
+		if err == nil {
+			helmOptions.ValueFiles = append(helmOptions.ValueFiles, defaultValuesFileName)
+		}
 
-	err = o.InstallChartWithOptions(helmOptions)
-	if err != nil {
-		return err
+		err = o.InstallChartWithOptions(helmOptions)
+		if err != nil {
+			return err
+		}
 	}
 
 	url, appNames, err := o.findPreviewURL(kubeClient, kserveClient)
@@ -957,6 +987,9 @@ func (o *PreviewOptions) GetPreviewValuesConfig(projectConfig *config.ProjectCon
 	values := config.PreviewValuesConfig{
 		ExposeController: o.HelmValuesConfig.ExposeController,
 		Preview: &config.Preview{
+			Name:        o.Name,
+			ReleaseName: o.ReleaseName,
+			Namespace:   o.Namespace,
 			Image: &config.Image{
 				Repository: repository,
 				Tag:        tag,

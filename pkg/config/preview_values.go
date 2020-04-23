@@ -12,7 +12,10 @@ type Image struct {
 }
 
 type Preview struct {
-	Image *Image `json:"image,omitempty"`
+	Name        string `json:"name,omitempty"`
+	ReleaseName string `json:"releaseName,omitempty"`
+	Namespace   string `json:"namespace,omitempty"`
+	Image       *Image `json:"image,omitempty"`
 }
 
 type PreviewValuesConfig struct {
